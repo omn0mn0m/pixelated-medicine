@@ -1,0 +1,10 @@
+openpyxl
+python-dotenv
+requests
+igdb
+matplotlib
+statsmodels
+pillow
+scipy
+pandas
+numpy
