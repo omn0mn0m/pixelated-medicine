@@ -6,7 +6,7 @@
     <title>EMR Patient Notes</title>
     <!-- Tailwind CSS for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- SheetJS library for reading spreadsheet data -->
+    <!-- SheetJS library for reading and writing spreadsheet data -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
     <!-- Icon library -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -15,6 +15,7 @@
         body {
             font-family: 'Source Sans Pro', sans-serif;
             background-color: #f0f2f5;
+            overflow-x: hidden; /* Prevent horizontal scroll */
         }
         .active-note {
             background-color: #e6f7ff;
@@ -53,16 +54,49 @@
             background-size: 1.25em;
             padding-right: 2.5rem;
         }
+        /* Sidebar transition styles */
+        #sidebar {
+            transition: transform 0.3s ease-in-out;
+        }
+        /* On larger screens (md), sidebar is always visible and pushes main content */
+        @media (min-width: 768px) {
+            #sidebar {
+                transform: translateX(0) !important;
+            }
+            #main-content {
+                margin-left: 18rem; /* w-72 */
+            }
+            #menu-toggle {
+                display: none;
+            }
+        }
+        .filter-link {
+            cursor: pointer;
+            color: #3b82f6; /* blue-500 */
+            text-decoration: underline;
+            font-weight: 500;
+        }
+        .filter-link:hover {
+            color: #2563eb; /* blue-600 */
+        }
     </style>
 </head>
 <body class="text-gray-800">
 
-    <div class="flex h-screen bg-gray-100">
-        <!-- Left Panel: Patient Notes List -->
-        <aside class="w-1/3 xl:w-1/4 h-full flex flex-col bg-white border-r border-gray-200">
+    <div class="relative min-h-screen">
+        <!-- Overlay for mobile menu -->
+        <div id="menu-overlay" class="fixed inset-0 bg-black bg-opacity-50 z-20 hidden md:hidden"></div>
+
+        <!-- Left Panel / Sidebar -->
+        <aside id="sidebar" class="w-72 h-full flex flex-col bg-white border-r border-gray-200 fixed top-0 left-0 z-30 transform -translate-x-full">
             <header class="p-4 border-b border-gray-200 flex items-center justify-between">
-                <h1 class="text-xl font-bold text-gray-700">Patient Encounters</h1>
-                <i class="fas fa-notes-medical text-blue-600 text-2xl"></i>
+                <div class="flex items-center space-x-3">
+                    <i class="fas fa-notes-medical text-blue-600 text-2xl"></i>
+                    <h1 class="text-xl font-bold text-gray-700">Patient Encounters</h1>
+                </div>
+                <a href="#" id="downloadLink" title="Download Data as Excel" class="text-gray-500 hover:text-blue-600 transition-colors hidden">
+                    <i class="fas fa-file-excel text-xl"></i>
+                </a>
             </header>
             
             <!-- Filters Section -->
@@ -77,7 +111,6 @@
             </div>
 
             <div id="noteList" class="flex-grow overflow-y-auto">
-                <!-- Notes will be inserted here -->
                  <div id="loader" class="flex justify-center items-center h-full">
                     <div class="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
                 </div>
@@ -85,17 +118,23 @@
         </aside>
 
         <!-- Right Panel: Note Details -->
-        <main id="noteDetail" class="w-2/3 xl:w-3/4 h-full flex flex-col">
+        <main id="main-content" class="flex-1 flex flex-col h-screen">
             <header class="bg-white p-4 border-b border-gray-200 flex justify-between items-center">
-                 <h2 id="patientName" class="text-2xl font-bold text-gray-800">Select a Patient Note</h2>
-                 <div id="patientInfo" class="text-right text-sm text-gray-500">
-                    <!-- Patient details like Age and Game will go here -->
+                <div class="flex items-center">
+                    <button id="menu-toggle" class="mr-4 text-gray-600 hover:text-blue-600">
+                        <i class="fas fa-bars text-2xl"></i>
+                    </button>
+                    <h2 id="patientName" class="text-xl md:text-2xl font-bold text-gray-800 truncate cursor-pointer" title="Filter by this patient">Select a Patient Note</h2>
+                </div>
+                 <div id="patientInfo" class="text-right text-sm text-gray-500 hidden sm:block">
+                    <!-- Patient details here -->
                  </div>
             </header>
             <div id="noteContent" class="flex-grow overflow-y-auto p-6 bg-gray-50">
-                <div id="placeholder" class="h-full flex flex-col justify-center items-center text-gray-400">
+                <div id="placeholder" class="h-full flex flex-col justify-center items-center text-gray-400 text-center">
                     <i class="fas fa-file-alt text-6xl mb-4"></i>
-                    <p class="text-xl">Select a patient note from the list to view details.</p>
+                    <p class="text-xl">Select a patient note to view details.</p>
+                    <p class="text-md mt-2 md:hidden">Click the <i class="fas fa-bars"></i> icon to open the patient list.</p>
                 </div>
                 <div id="details-container" class="hidden">
                     <!-- SOAP notes will be dynamically inserted here -->
@@ -105,31 +144,15 @@
                             <p id="detail-complaint" class="text-xl text-gray-900"></p>
                         </div>
                         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                            <div class="soap-section">
-                                <h4>Subjective</h4>
-                                <p id="detail-subjective"></p>
-                            </div>
-                            <div class="soap-section">
-                                <h4>Objective</h4>
-                                <p id="detail-objective"></p>
-                            </div>
-                            <div class="soap-section col-span-1 lg:col-span-2">
-                                <h4>Assessment / Plan</h4>
-                                <p id="detail-assessment"></p>
-                            </div>
-                             <div class="soap-section col-span-1 lg:col-span-2">
-                                <h4>Recovery / Follow-Up</h4>
-                                <p id="detail-recovery"></p>
-                            </div>
+                            <div class="soap-section"><h4>Subjective</h4><p id="detail-subjective"></p></div>
+                            <div class="soap-section"><h4>Objective</h4><p id="detail-objective"></p></div>
+                            <div class="soap-section col-span-1 lg:col-span-2"><h4>Assessment / Plan</h4><p id="detail-assessment"></p></div>
+                            <div class="soap-section col-span-1 lg:col-span-2"><h4>Recovery / Follow-Up</h4><p id="detail-recovery"></p></div>
                         </div>
                          <div class="mt-6 pt-4 border-t border-gray-200">
                             <h4 class="font-bold text-gray-600 mb-2">Additional Information</h4>
-                            <div class="text-sm text-gray-600 space-y-1">
-                                <p><strong>ICD-10 Code:</strong> <span id="detail-icd10"></span></p>
-                                <p><strong>Setting:</strong> <span id="detail-setting"></span></p>
-                                <p><strong>Treatment Accuracy:</strong> <span id="detail-treatment-accuracy"></span></p>
-                                <p><strong>Recovery Accuracy:</strong> <span id="detail-recovery-accuracy"></span></p>
-                                <p><strong>Explanation:</strong> <span id="detail-explanation"></span></p>
+                            <div id="additional-info-list" class="text-sm text-gray-600 space-y-1">
+                                <!-- Info will be populated by JS -->
                             </div>
                         </div>
                     </div>
@@ -142,15 +165,20 @@
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             // DOM Elements
+            const sidebar = document.getElementById('sidebar');
+            const menuToggle = document.getElementById('menu-toggle');
+            const menuOverlay = document.getElementById('menu-overlay');
             const loader = document.getElementById('loader');
             const noteList = document.getElementById('noteList');
             const searchInput = document.getElementById('searchInput');
             const gameFilter = document.getElementById('gameFilter');
             const icdFilter = document.getElementById('icdFilter');
+            const downloadLink = document.getElementById('downloadLink');
             const patientName = document.getElementById('patientName');
             const patientInfo = document.getElementById('patientInfo');
             const placeholder = document.getElementById('placeholder');
             const detailsContainer = document.getElementById('details-container');
+            const additionalInfoList = document.getElementById('additional-info-list');
 
             // Detail fields
             const detailComplaint = document.getElementById('detail-complaint');
@@ -158,16 +186,18 @@
             const detailObjective = document.getElementById('detail-objective');
             const detailAssessment = document.getElementById('detail-assessment');
             const detailRecovery = document.getElementById('detail-recovery');
-            const detailIcd10 = document.getElementById('detail-icd10');
-            const detailSetting = document.getElementById('detail-setting');
-            const detailTreatmentAccuracy = document.getElementById('detail-treatment-accuracy');
-            const detailRecoveryAccuracy = document.getElementById('detail-recovery-accuracy');
-            const detailExplanation = document.getElementById('detail-explanation');
-
 
             const sheetUrl = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQntM4gqqcetDRtlNI_GPGopx-HfalfC0efux_-KhllcUUStVeeoUYF7SutJdeC-zWbeVn7Vpxkka4R/pub?output=xlsx';
             let allNotes = [];
             let activeNoteElement = null;
+
+            function toggleMenu() {
+                sidebar.classList.toggle('-translate-x-full');
+                menuOverlay.classList.toggle('hidden');
+            }
+
+            menuToggle.addEventListener('click', toggleMenu);
+            menuOverlay.addEventListener('click', toggleMenu);
 
             async function loadData() {
                 try {
@@ -181,6 +211,7 @@
                     allNotes = jsonData;
                     populateFilters(allNotes);
                     displayNotes(allNotes);
+                    setupDownloadLink(allNotes);
 
                 } catch (error) {
                     console.error("Error loading spreadsheet data:", error);
@@ -192,31 +223,29 @@
 
             function populateFilters(notes) {
                 const games = [...new Set(notes.map(note => note['Game']).filter(Boolean))].sort();
-                const icdCodes = [...new Set(notes.map(note => note['ICD-10']).filter(Boolean))].sort();
+                
+                // Handle comma-separated ICD-10 codes
+                const icdCodes = [...new Set(
+                    notes
+                        .flatMap(note => note['ICD-10'] ? String(note['ICD-10']).split(',') : [])
+                        .map(code => code.trim())
+                        .filter(Boolean)
+                )].sort();
 
-                games.forEach(game => {
-                    const option = new Option(game, game);
-                    gameFilter.add(option);
-                });
-
-                icdCodes.forEach(code => {
-                    const option = new Option(code, code);
-                    icdFilter.add(option);
-                });
+                games.forEach(game => gameFilter.add(new Option(game, game)));
+                icdCodes.forEach(code => icdFilter.add(new Option(code, code)));
             }
 
             function displayNotes(notes) {
                 noteList.innerHTML = '';
                 if (notes.length === 0) {
-                    noteList.innerHTML = `<p class="p-4 text-gray-500 text-center">No patient notes match the current filters.</p>`;
+                    noteList.innerHTML = `<p class="p-4 text-gray-500 text-center">No patient notes match.</p>`;
                 }
 
-                notes.forEach((note, index) => {
+                notes.forEach((note) => {
                     const card = document.createElement('div');
                     card.className = 'p-4 border-b border-l-4 border-transparent cursor-pointer hover:bg-blue-50 transition-colors duration-150';
-                    // Use a unique ID from the data if available, otherwise use index
-                    card.dataset.noteId = note['IGDB ID'] || index;
-
+                    
                     const character = note['Character'] || 'Unknown Patient';
                     const complaint = note['Chief Complaint'] || 'No complaint';
                     const game = note['Game'] || 'N/A';
@@ -229,36 +258,80 @@
 
                     card.addEventListener('click', () => {
                         showNoteDetails(note);
-                        if (activeNoteElement) {
-                            activeNoteElement.classList.remove('active-note');
-                        }
+                        if (activeNoteElement) activeNoteElement.classList.remove('active-note');
                         card.classList.add('active-note');
                         activeNoteElement = card;
+                        if (window.innerWidth < 768) toggleMenu();
                     });
                     noteList.appendChild(card);
                 });
+            }
+
+            function setAndApplyFilter(filterType, value) {
+                if (!value) return; 
+                searchInput.value = '';
+                gameFilter.value = '';
+                icdFilter.value = '';
+
+                switch (filterType) {
+                    case 'character':
+                        searchInput.value = value;
+                        break;
+                    case 'game':
+                        gameFilter.value = value;
+                        break;
+                    case 'icd':
+                        icdFilter.value = value;
+                        break;
+                }
+                applyFilters();
+
+                if (window.innerWidth < 768 && sidebar.classList.contains('-translate-x-full')) {
+                    toggleMenu();
+                }
             }
 
             function showNoteDetails(note) {
                 placeholder.style.display = 'none';
                 detailsContainer.style.display = 'block';
 
-                patientName.textContent = note['Character'] || 'Unknown Patient';
-                patientInfo.innerHTML = `
-                    <span><strong>Age:</strong> ${note['Age'] || 'N/A'}</span>
-                    <span class="ml-4"><strong>Game:</strong> ${note['Game'] || 'N/A'}</span>
-                `;
+                const character = note['Character'] || 'Unknown Patient';
+                patientName.textContent = character;
+                patientName.onclick = () => setAndApplyFilter('character', character);
+
+                patientInfo.innerHTML = `<span><strong>Age:</strong> ${note['Age'] || 'N/A'}</span>`;
 
                 detailComplaint.textContent = note['Chief Complaint'] || 'N/A';
                 detailSubjective.textContent = note['Subjective'] || 'N/A';
                 detailObjective.textContent = note['Objective'] || 'N/A';
                 detailAssessment.textContent = note['Assessment/ Plan'] || 'N/A';
                 detailRecovery.textContent = note['Recovery/ Follow-Up/ Effect of Treatment'] || 'N/A';
-                detailIcd10.textContent = note['ICD-10'] || 'N/A';
-                detailSetting.textContent = note['Setting'] || 'N/A';
-                detailTreatmentAccuracy.textContent = note['Treatment Accuracy'] || 'N/A';
-                detailRecoveryAccuracy.textContent = note['Recovery Accuracy'] || 'N/A';
-                detailExplanation.textContent = note['Explanation'] || 'N/A';
+
+                // Create clickable links for Game and each ICD-10 code
+                const gameLink = `<a class="filter-link" title="Filter by this game">${note['Game'] || 'N/A'}</a>`;
+                
+                const icdCodes = note['ICD-10'] ? String(note['ICD-10']).split(',').map(c => c.trim()) : [];
+                const icdLinks = icdCodes.length > 0 
+                    ? icdCodes.map(code => `<a class="filter-link" title="Filter by this code">${code}</a>`).join(', ')
+                    : 'N/A';
+
+                additionalInfoList.innerHTML = `
+                    <p><strong>Game:</strong> ${gameLink}</p>
+                    <p><strong>ICD-10 Code(s):</strong> ${icdLinks}</p>
+                    <p><strong>Setting:</strong> <span>${note['Setting'] || 'N/A'}</span></p>
+                    <p><strong>Treatment Accuracy:</strong> <span>${note['Treatment Accuracy'] || 'N/A'}</span></p>
+                    <p><strong>Recovery Accuracy:</strong> <span>${note['Recovery Accuracy'] || 'N/A'}</span></p>
+                    <p><strong>Explanation:</strong> <span>${note['Explanation'] || 'N/A'}</span></p>
+                `;
+
+                // Add event listeners for the new links
+                const gameAnchor = additionalInfoList.querySelector('a[title="Filter by this game"]');
+                if (gameAnchor) gameAnchor.onclick = () => setAndApplyFilter('game', note['Game']);
+                
+                const icdAnchors = additionalInfoList.querySelectorAll('a[title="Filter by this code"]');
+                icdAnchors.forEach(link => {
+                    link.onclick = () => setAndApplyFilter('icd', link.textContent);
+                });
             }
 
             function applyFilters() {
@@ -266,28 +339,31 @@
                 const selectedGame = gameFilter.value;
                 const selectedIcd = icdFilter.value;
 
-                let filteredNotes = allNotes;
+                let filteredNotes = allNotes.filter(note => {
+                    const gameMatch = !selectedGame || note['Game'] === selectedGame;
+                    
+                    // Check if the selected ICD code is in the note's list of codes
+                    const noteIcdCodes = note['ICD-10'] ? String(note['ICD-10']).split(',').map(c => c.trim()) : [];
+                    const icdMatch = !selectedIcd || noteIcdCodes.includes(selectedIcd);
 
-                // Filter by search query
-                if (searchQuery) {
-                    filteredNotes = filteredNotes.filter(note => 
-                        Object.values(note).some(value => 
-                            String(value).toLowerCase().includes(searchQuery)
-                        )
+                    const searchMatch = !searchQuery || Object.values(note).some(value => 
+                        String(value).toLowerCase().includes(searchQuery)
                     );
-                }
-
-                // Filter by selected game
-                if (selectedGame) {
-                    filteredNotes = filteredNotes.filter(note => note['Game'] === selectedGame);
-                }
-
-                // Filter by selected ICD-10 code
-                if (selectedIcd) {
-                    filteredNotes = filteredNotes.filter(note => note['ICD-10'] === selectedIcd);
-                }
-
+                    return gameMatch && icdMatch && searchMatch;
+                });
                 displayNotes(filteredNotes);
+            }
+
+            function setupDownloadLink(notes) {
+                if (!notes || notes.length === 0) return;
+                downloadLink.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const workbook = XLSX.utils.book_new();
+                    const worksheet = XLSX.utils.json_to_sheet(notes);
+                    XLSX.utils.book_append_sheet(workbook, worksheet, 'PatientNotes');
+                    XLSX.writeFile(workbook, 'patient_notes_export.xlsx');
+                });
+                downloadLink.classList.remove('hidden');
             }
             
             searchInput.addEventListener('input', applyFilters);
