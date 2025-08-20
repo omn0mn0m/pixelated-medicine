@@ -190,19 +190,26 @@ for category in ['age_rating_category', 'age_rating_descriptions', 'franchise', 
 with pd.ExcelWriter("./stats/Merged.xlsx", mode='a') as writer:
     pd.concat(descriptive_exploded).to_excel(writer, sheet_name=f"Descriptive_{category}")
 
-## Means for categories that need exploding
+# Means for categories that need exploding
+all_treatment_means = {}
+all_recovery_means = {}
+
 for category in ['age_rating_descriptions', 'genres', 'themes']:
     exploded_merged = merged.explode(category)
     exploded_merged_recovery = merged_recovery.explode(category)
     
-    mean_exploded = exploded_merged.groupby(category)[['treatment_accuracy']].mean()
-    mean_rec_exploded = exploded_merged_recovery.groupby(category)[['recovery_accuracy']].mean()
+    all_treatment_means[category] = exploded_merged.groupby(category)[['treatment_accuracy']].mean()
+    all_recovery_means[category] = exploded_merged_recovery.groupby(category)[['recovery_accuracy']].mean()
 
-    with pd.ExcelWriter("./stats/Merged.xlsx", mode='a') as writer:
-        mean_exploded.to_excel(writer, sheet_name=f"Treatment Mean_{category}")
-        mean_rec_exploded.to_excel(writer, sheet_name=f"Recovery Mean_{category}")
+# Write out means
+all_treatment_means_df = pd.concat(all_treatment_means)
+all_recovery_means_df = pd.concat(all_recovery_means)
 
-## Correlation - Spearman's chosen due to ordinal data
+with pd.ExcelWriter("./stats/Merged.xlsx", mode='a') as writer:
+    all_treatment_means_df.to_excel(writer, sheet_name="Consolidated Treatment Means")
+    all_recovery_means_df.to_excel(writer, sheet_name="Consolidated Recovery Means")
+
+# Correlation - Spearman's chosen due to ordinal data
 data_to_corr = pd.DataFrame({
     'treatment_accuracy': merged_recovery['treatment_accuracy'].astype(int),
     'reecovery_accuracy': merged_recovery['recovery_accuracy'].astype(int),
@@ -217,10 +224,14 @@ with pd.ExcelWriter("./stats/Merged.xlsx", mode='a') as writer:
 
 ## Group Testing
 y = ['treatment_accuracy', 'recovery_accuracy']
-x = ['age_rating_category', 'age_rating_descriptions', 'game_modes', 'genres', 'keywords', 'platforms', 'player_perspectives', 'themes']
+x = [
+    'age_rating_category', 'age_rating_descriptions', 'game_modes',
+    'genres', 'platforms', 'player_perspectives', 'themes',
+    'keywords' # takes a long time to run, can comment out unless interested
+]
 
-shapiro_results = {}
 kruskal_results = {}
+olr_references = {} # NEW: Dictionary to store the reference category for each OLR model
 
 for x_header in x:
     for y_header in y:
@@ -240,95 +251,89 @@ for x_header in x:
         if df_1way.empty or df_1way[x_header].nunique() < 2:
             continue
         
-        df_1way[y_header] = pd.to_numeric(df_1way[y_header], errors='coerce')
+        df_1way[y_header] = pd.to_numeric(df_1way[y_header], errors='coerce').astype(int)
         df_1way.dropna(subset=[y_header, x_header], inplace=True)
-        df_1way[y_header] = df_1way[y_header].astype(int)
-
-        if df_1way.empty or df_1way[x_header].nunique() < 2:
-            continue
 
         # Skip if not enough data now that more stuff has been dropped
         if df_1way.empty or df_1way[x_header].nunique() < 2:
             continue
 
+        # For keywords only, we need to remove a lot of keywords
+        if x_header == 'keywords':
+            min_occurrence_threshold = 5
+            
+            keyword_counts = df_1way[x_header].value_counts()
+            valid_keywords = keyword_counts[keyword_counts >= min_occurrence_threshold].index
+            
+            original_rows = len(df_1way)
+            num_original_keywords = len(keyword_counts)
+            
+            df_1way = df_1way[df_1way[x_header].isin(valid_keywords)]
+            
+            print(f"  Retained {len(valid_keywords)} of {num_original_keywords} unique keywords.")
+            print(f"  Filtered data from {original_rows} to {len(df_1way)} rows.")
+
+        comparison_name = f"{x_header}-{y_header}"
         formula = f"{y_header} ~ C({x_header})"
-
-        # OLS
-        res_ols = smf.ols(formula=formula, data=df_1way).fit()
-        ols_summary_tables = pd.read_html(StringIO(res_ols.summary().as_html()), header=0, index_col=0)
-        ols_summary_df = pd.concat(ols_summary_tables)
-
-        with pd.ExcelWriter("./stats/Merged.xlsx", mode='a') as writer:
-            ols_summary_df.to_excel(writer, sheet_name=f"OLS_{x_header}-{y_header}")
-
+        
         # OLR
+        # Calculate reference category
+        value_counts = df_1way[x_header].value_counts()
+        if value_counts.empty:
+            continue
+        reference_category = value_counts.index[0]
+        olr_references[comparison_name] = reference_category
+        formula_olr = f"{y_header} ~ C({x_header}, Treatment(reference='{reference_category}'))"
+
+        # Run OLR
         model_olr = OrderedModel.from_formula(
-            formula,
+            formula_olr,
             df_1way,
             distr='logit'
         )
+        
         res_olr = model_olr.fit(method='bfgs', disp=False)
         
-        olr_summary_tables = pd.read_html(StringIO(res_olr.summary().as_html()), header=0, index_col=0)
-        olr_summary_df = pd.concat(olr_summary_tables)
+        olr_summary_df = pd.concat(
+            pd.read_html(StringIO(res_olr.summary().as_html()), header=0, index_col=0)
+        )
+
+        # Odds ratio for OLR
+        olr_summary_df['Odds Ratio'] = np.exp(olr_summary_df['coef'])
+        olr_summary_df['OR 2.5%'] = np.exp(olr_summary_df['[0.025'])
+        olr_summary_df['OR 97.5%'] = np.exp(olr_summary_df['0.975]'])
+        
         with pd.ExcelWriter("./stats/Merged.xlsx", mode='a') as writer:
             olr_summary_df.to_excel(writer, sheet_name=f"OLR_{x_header}-{y_header}")
 
-        # Shapiro-Wilk
-        shapiro_results[f"{x_header}-{y_header}"] = sp.stats.shapiro(res_ols.resid)
-
-        # Non-parametric => run  Kruskal-Wallis
-        if shapiro_results[f"{x_header}-{y_header}"].pvalue <= 0.05:
-            multi = sm.stats.multicomp.MultiComparison(
-                np.array(df_1way[y_header], dtype='float64'),
-                df_1way[x_header]
+        # Kruskal-Wallis
+        multi = sm.stats.multicomp.MultiComparison(
+            np.array(df_1way[y_header], dtype='float64'),
+            df_1way[x_header]
+        )
+        kruskal = multi.kruskal()
+        kruskal_results[f"{x_header}-{y_header}"] = kruskal
+        
+        # Significant Kruskal-Walls => Dunn post-hoc
+        if (kruskal < 0.05):
+            dunn_results = posthoc.posthoc_dunn(
+                df_1way,
+                val_col=y_header,
+                group_col=x_header,
+                p_adjust='holm'
             )
-            kruskal = multi.kruskal()
-            kruskal_results[f"{x_header}-{y_header}"] = kruskal
-
-            # Significant Kruskal-Walls => Dunn post-hoc
-            if (kruskal < 0.05):
-                dunn_results = posthoc.posthoc_dunn(
-                    df_1way,
-                    val_col=y_header,
-                    group_col=x_header,
-                    p_adjust='holm'
-                )
-                print(dunn_results)
-
-                with pd.ExcelWriter("./stats/Merged.xlsx", mode='a') as writer:
-                    dunn_results.to_excel(writer, sheet_name=f"Dunn_{x_header}-{y_header}")
-        # Parametric => run ANOVA
-        else:
-            anova_df = sm.stats.anova_lm(res_ols, type=2)
-            print(anova_df)
-
+            print(dunn_results)
+            
             with pd.ExcelWriter("./stats/Merged.xlsx", mode='a') as writer:
-                anova_df.to_excel(writer, sheet_name=f"ANOVA_{x_header}-{y_header}")
+                dunn_results.to_excel(writer, sheet_name=f"Dunn_{x_header}-{y_header}")
 
-            # Significant ANOVA => Tukey post-hoc
-            if anova_df['PR(>F)'][0] < 0.05:
-                multi = sm.stats.multicomp.MultiComparison(
-                    np.array(df_1way[y_header], dtype='float64'),
-                    df_1way[x_header]
-                )
-                
-                tukey = multi.tukeyhsd()
-                tukey_df = pd.DataFrame(tukey._results_table.data[1:],
-                                        columns=tukey._results_table.data[0])
-                tukey_df['variable'] = y_header
-                tukey_df['grouping'] = x_header
-
-# Write out the Shapiro-Wilk results
-shapiro_df = pd.DataFrame.from_dict(shapiro_results, orient='index', columns=['statistic', 'pvalue'])
-shapiro_df.index.name = 'Comparison'
-
-with pd.ExcelWriter("./stats/Merged.xlsx", mode='a') as writer:
-    shapiro_df.to_excel(writer, sheet_name=f"Shapiro-Wilk")
-
-# Write out Kruskal-Wallis results
+# Write out end of loop things
 kruskal_df = pd.DataFrame.from_dict(kruskal_results, orient='index', columns=['p_value'])
 kruskal_df.index_Name = 'Comparison'
 
+references_df = pd.DataFrame.from_dict(olr_references, orient='index', columns=['Reference Category'])
+references_df.index.name = 'Comparison'
+
 with pd.ExcelWriter("./stats/Merged.xlsx", mode='a') as writer:
     kruskal_df.to_excel(writer, sheet_name=f"Kruskal-Wallis")
+    references_df.to_excel(writer, sheet_name="OLR Reference Categories")
