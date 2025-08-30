@@ -35,7 +35,7 @@ IS_FICTIONAL = 'is_fictional'
 REGRESSION_CATEGORIES = [
     'age_rating_category', 'age_rating_descriptions', 'game_modes',
     'genres', 'platforms', 'player_perspectives', 'themes',
-    'keywords' # can take a long time to run, so comment out when testing code
+#    'keywords' # can take a long time to run, so comment out when testing code
 ]
 
 # Replacement dictionary for table outputs
