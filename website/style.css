@@ -1,0 +1,73 @@
+body {
+  font-family: sans-serif;
+  background-color: #f0f2f5;
+  overflow-x: hidden;
+  /* Prevent horizontal scroll */
+}
+
+.active-note {
+  background-color: #e6f7ff;
+  border-left-color: #1890ff;
+}
+
+/* Custom scrollbar for a more modern look */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}
+
+.soap-section h4 {
+  font-family: sans-serif;
+  font-weight: 700;
+  color: #1f2937;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid #e5e7eb;
+  padding-bottom: 0.25rem;
+}
+
+/* Sidebar transition styles */
+#sidebar {
+  transition: transform 0.3s ease-in-out;
+}
+
+/* On larger screens (md), sidebar is always visible and pushes main content */
+@media (min-width: 768px) {
+  #sidebar {
+    transform: translateX(0) !important;
+  }
+
+  #main-content {
+    margin-left: 18rem;
+    /* w-72 */
+  }
+
+  #menu-toggle {
+    display: none;
+  }
+}
+
+.filter-link {
+  cursor: pointer;
+  color: #3b82f6;
+  /* blue-500 */
+  text-decoration: underline;
+  font-weight: 500;
+}
+
+.filter-link:hover {
+  color: #2563eb;
+  /* blue-600 */
+}
