@@ -22,6 +22,7 @@ AUTH_URL = 'https://id.twitch.tv/oauth2/token'
 DATA_FILE_PATH = './data/Medical Encounter Data.xlsx'
 TABLES_OUTPUT_PATH = "./data/Tables.xlsx"
 SUPPLEMENTAL_OUTPUT_PATH = "./data/Supplemental_Results.xlsx"
+APPENDICES_OUTPUT_PATH = "./data/Appendices.xlsx"
 MIN_CATEGORY_COUNT = 10
 P_VALUE_THRESHOLD = 0.05
 
@@ -34,11 +35,12 @@ IS_FICTIONAL = 'is_fictional'
 REGRESSION_CATEGORIES = [
     'age_rating_category', 'age_rating_descriptions', 'game_modes',
     'genres', 'platforms', 'player_perspectives', 'themes',
+    'keywords' # can take a long time to run, so comment out when testing code
 ]
 
 # Replacement dictionary for table outputs
 HUMAN_READABLE_NAMES = {
-    # Predictor Variables
+    # Game Characteristic Variables
     'age_rating_category': 'ESRB Rating',
     'age_rating_descriptions': 'ESRB Content Descriptors',
     'game_modes': 'Game Modes',
@@ -46,6 +48,7 @@ HUMAN_READABLE_NAMES = {
     'platforms': 'Platforms',
     'player_perspectives': 'Player Perspectives',
     'themes': 'Themes',
+    'keywords': 'Keywords',
 
     # Outcome Variables
     'treatment_accuracy': 'Treatment Accuracy',
@@ -77,12 +80,10 @@ def format_regression_for_manuscript(model_results, title, full_results=False):
     if isinstance(model_results.model, (sm.Logit, OrderedModel)):
         results_df["Odds Ratio"] = np.exp(model_results.params.values)
 
-    # For manuscript tables, we clean up variable names and remove intercepts/cut-points
     if not full_results:
         results_df['Variable'] = results_df['Variable'].str.extract(r'\[T\.(.*?)\]')
         results_df.dropna(subset=['Variable'], inplace=True)
     else:
-        # For full results, we just clean up the names that match the pattern
         results_df['Variable'] = results_df['Variable'].str.extract(r'\[T\.(.*?)\]').fillna(results_df['Variable'])
 
     numeric_cols = results_df.select_dtypes(include=np.number).columns
@@ -94,6 +95,29 @@ def format_regression_for_manuscript(model_results, title, full_results=False):
     results_df.name = title
     return results_df
 
+def add_footnotes_to_table(table, ref_dict):
+    """Appends footnote rows for reference groups to a formatted table, preserving the table name."""
+    original_name = table.name
+
+    if not ref_dict or table.empty:
+        return table
+
+    footnote_rows = []
+    footnote_col_name = table.columns[0]
+
+    for game_characteristic, ref_cat in ref_dict.items():
+        if game_characteristic in table[footnote_col_name].unique():
+            note = f"Note for {game_characteristic}: Reference group is '{ref_cat}'."
+            footnote_rows.append({footnote_col_name: note})
+
+    if footnote_rows:
+        footnote_df = pd.DataFrame(footnote_rows)
+        new_table = pd.concat([table, footnote_df], ignore_index=True)
+        new_table.name = original_name
+        return new_table
+
+    return table
+
 def format_icd10_table(icd10_counts):
     """Formats Table: Top 10 ICD-10 Categories."""
     top_10 = icd10_counts.head(10).reset_index()
@@ -103,42 +127,42 @@ def format_icd10_table(icd10_counts):
     top_10.name = "Top 10 ICD-10"
     return top_10
 
-def format_summary_tables(games_df, injuries_df):
+def format_summary_tables(games_df, encounters_df):
     """Formats Tables: Summary of Game Metadata."""
     def summarize_df(df, name):
         summary_data = []
-        for col in REGRESSION_CATEGORIES:
-            if col in df.columns:
-                exploded = df[col].explode()
-                count = exploded.count()
-                unique = exploded.nunique()
-                top = exploded.mode()[0] if not exploded.mode().empty else 'N/A'
-                freq = (exploded == top).sum()
-                summary_data.append([col, count, unique, top, freq])
+        cols_to_summarize = [col for col in REGRESSION_CATEGORIES if col in df.columns]
+        for col in cols_to_summarize:
+            exploded = df[col].explode()
+            count = exploded.count()
+            unique = exploded.nunique()
+            top = exploded.mode()[0] if not exploded.mode().empty else 'N/A'
+            freq = (exploded == top).sum()
+            summary_data.append([col, count, unique, top, freq])
         summary_df = pd.DataFrame(summary_data, columns=['Game Characteristic', 'Count', 'Unique', 'Top', 'Frequency'])
         summary_df['Game Characteristic'] = summary_df['Game Characteristic'].map(HUMAN_READABLE_NAMES).fillna(summary_df['Game Characteristic'])
         summary_df.name = name
         return summary_df
     game_summary_table = summarize_df(games_df, "Game Summary")
-    injury_summary_table = summarize_df(injuries_df, "Injury Summary")
-    return game_summary_table, injury_summary_table
+    encounter_summary_table = summarize_df(encounters_df, "Encounter Summary")
+    return game_summary_table, encounter_summary_table
 
 def format_accuracy_mean_tables(treatment_means, recovery_means):
     """Formats Tables: Average Accuracy by Genre and Theme."""
     def create_accuracy_table(means_dict, accuracy_col_name, name):
         genre_means = means_dict.get('genres', pd.DataFrame()).round(1)
         theme_means = means_dict.get('themes', pd.DataFrame()).round(1)
+        keyword_means = means_dict.get('keywords', pd.DataFrame()).round(1)
 
         genre_means['Category Type'] = 'Genre'
         theme_means['Category Type'] = 'Theme'
+        keyword_means['Category Type'] = 'Keyword'
 
-        genre_means.index.name = 'Category Name'
-        theme_means.index.name = 'Category Name'
+        for df in [genre_means, theme_means, keyword_means]:
+            df.index.name = 'Category Name'
+            df.rename(columns={accuracy_col_name: 'Average Accuracy'}, inplace=True)
 
-        genre_means.rename(columns={accuracy_col_name: 'Average Accuracy'}, inplace=True)
-        theme_means.rename(columns={accuracy_col_name: 'Average Accuracy'}, inplace=True)
-
-        combined = pd.concat([genre_means, theme_means]).reset_index()
+        combined = pd.concat([genre_means, theme_means, keyword_means]).reset_index()
 
         combined.sort_values(by=['Category Type', 'Category Name'], inplace=True)
         combined.loc[combined.duplicated(subset=['Category Type']), 'Category Type'] = ''
@@ -155,15 +179,17 @@ def format_kruskal_wallis_table(results_list):
     """Formats Table: Kruskal-Wallis Test Results."""
     kruskal_data = [r for r in results_list if r['analysis_type'] == 'Kruskal-Wallis']
     if not kruskal_data:
-        return pd.DataFrame()
+        empty_df = pd.DataFrame()
+        empty_df.name = "Kruskal-Wallis Results"
+        return empty_df
 
     kruskal_df = pd.DataFrame(kruskal_data)
     kruskal_df['p_value'] = format_p_values_for_manuscript(kruskal_df['p_value'])
-    kruskal_df['predictor'] = kruskal_df['predictor'].map(HUMAN_READABLE_NAMES)
+    kruskal_df['game_characteristic'] = kruskal_df['game_characteristic'].map(HUMAN_READABLE_NAMES).fillna(kruskal_df['game_characteristic'])
     kruskal_df['outcome'] = kruskal_df['outcome'].map(HUMAN_READABLE_NAMES)
 
     kruskal_df.rename(columns={
-        'outcome': 'Accuracy Type', 'predictor': 'Game Characteristic',
+        'outcome': 'Accuracy Type', 'game_characteristic': 'Game Characteristic',
         'statistic': 'H-statistic', 'p_value': 'p-value', 'eta_squared': 'Eta Squared'
     }, inplace=True)
 
@@ -191,11 +217,15 @@ def format_dunn_tables(results_list):
         significant = melted[melted['p-value'] < P_VALUE_THRESHOLD].copy()
         if not significant.empty:
             significant['Analysis Type'] = HUMAN_READABLE_NAMES.get(result['outcome'])
-            significant['Category'] = HUMAN_READABLE_NAMES.get(result['predictor'])
+            significant['Category'] = HUMAN_READABLE_NAMES.get(result['game_characteristic'], result['game_characteristic'])
             all_significant.append(significant)
 
     if not all_significant:
-        return pd.DataFrame(), pd.DataFrame()
+        empty_df1 = pd.DataFrame()
+        empty_df2 = pd.DataFrame()
+        empty_df1.name = "Dunn Post-Hoc (Treatment)"
+        empty_df2.name = "Dunn Post-Hoc (Recovery)"
+        return empty_df1, empty_df2
 
     final_table = pd.concat(all_significant, ignore_index=True)
     final_table['p-value'] = format_p_values_for_manuscript(final_table['p-value'])
@@ -221,72 +251,147 @@ def format_dunn_tables(results_list):
     return treatment_table, recovery_table
 
 def format_olr_tables(results_list):
-    """Formats significant Ordinal Logistic Regression results into two tables."""
+    """Formats significant Ordinal Logistic Regression results and returns tables and their reference groups."""
     olr_results = [r for r in results_list if r['analysis_type'] == 'OLR']
     significant_dfs = []
+    treatment_refs, recovery_refs = {}, {}
+
     for res in olr_results:
         formatted = format_regression_for_manuscript(res['model_results'], "")
         significant = formatted[formatted['P-Value'] < P_VALUE_THRESHOLD].copy()
 
         if not significant.empty:
-            significant['P-Value'] = format_p_values_for_manuscript(significant['P-Value'])
-            significant['Predictor'] = HUMAN_READABLE_NAMES.get(res['predictor'])
+            game_characteristic_name = HUMAN_READABLE_NAMES.get(res['game_characteristic'], res['game_characteristic'])
+            significant['Game Characteristic'] = game_characteristic_name
             significant['Accuracy'] = res['outcome']
             significant_dfs.append(significant)
 
+            if res['outcome'] == TREATMENT_ACCURACY:
+                treatment_refs[game_characteristic_name] = res['reference_category']
+            else:
+                recovery_refs[game_characteristic_name] = res['reference_category']
+
     if not significant_dfs:
-        return pd.DataFrame(), pd.DataFrame()
+        empty_df1 = pd.DataFrame()
+        empty_df2 = pd.DataFrame()
+        empty_df1.name = "OLR (Treatment Accuracy)"
+        empty_df2.name = "OLR (Recovery Accuracy)"
+        return empty_df1, empty_df2, {}, {}
 
     combined = pd.concat(significant_dfs)
-    combined.rename(columns={'Variable': 'Category'}, inplace=True)
+    combined.rename(columns={'Variable': 'Category', 'P-Value': 'p-value'}, inplace=True)
     combined['Odds Ratio (95% CI)'] = combined.apply(
-        lambda row: f"{row['Odds Ratio']:.2f} [{row['CI Lower']:.2f}, {row['CI Upper']:.2f}]", axis=1)
-    combined.rename(columns={'P-Value': 'p-value'}, inplace=True)
-    final_cols = ['Predictor', 'Category', 'Odds Ratio (95% CI)', 'p-value']
+        lambda row: f"{row['Odds Ratio']:.2f} [{row['CI Lower']:.2f}, {row['CI Upper']:.2f}]" if pd.notna(row['Odds Ratio']) else '', axis=1)
+
+    final_cols = ['Game Characteristic', 'Category', 'Odds Ratio (95% CI)', 'p-value']
 
     treatment_table = combined[combined['Accuracy'] == TREATMENT_ACCURACY][final_cols].copy()
     recovery_table = combined[combined['Accuracy'] == RECOVERY_ACCURACY][final_cols].copy()
 
     if not treatment_table.empty:
-        treatment_table.sort_values(by=['Predictor', 'Category'], inplace=True)
-        treatment_table.loc[treatment_table.duplicated(subset=['Predictor']), 'Predictor'] = ''
+        treatment_table.sort_values(by=['Game Characteristic', 'Category'], inplace=True)
+        treatment_table.loc[treatment_table.duplicated(subset=['Game Characteristic']), 'Game Characteristic'] = ''
 
     if not recovery_table.empty:
-        recovery_table.sort_values(by=['Predictor', 'Category'], inplace=True)
-        recovery_table.loc[recovery_table.duplicated(subset=['Predictor']), 'Predictor'] = ''
+        recovery_table.sort_values(by=['Game Characteristic', 'Category'], inplace=True)
+        recovery_table.loc[recovery_table.duplicated(subset=['Game Characteristic']), 'Game Characteristic'] = ''
 
     treatment_table.name = "OLR (Treatment Accuracy)"
     recovery_table.name = "OLR (Recovery Accuracy)"
-    return treatment_table, recovery_table
+    return treatment_table, recovery_table, treatment_refs, recovery_refs
 
 def format_blr_table(results_list):
-    """Formats significant Binary Logistic Regression results into a manuscript table."""
+    """Formats significant BLR results and returns the table and its reference groups."""
     blr_results = [r for r in results_list if r['analysis_type'] == 'BLR']
     significant_dfs = []
+    blr_refs = {}
+
     for res in blr_results:
         formatted = format_regression_for_manuscript(res['model_results'], "")
         significant = formatted[formatted['P-Value'] < P_VALUE_THRESHOLD].copy()
 
         if not significant.empty:
-            significant['P-Value'] = format_p_values_for_manuscript(significant['P-Value'])
-            significant['Predictor'] = HUMAN_READABLE_NAMES.get(res['predictor'])
+            game_characteristic_name = HUMAN_READABLE_NAMES.get(res['game_characteristic'], res['game_characteristic'])
+            significant['Game Characteristic'] = game_characteristic_name
             significant_dfs.append(significant)
+            blr_refs[game_characteristic_name] = res['reference_category']
 
     if not significant_dfs:
-        blr_table = pd.DataFrame()
-        blr_table.name = "BLR (Is Fictional)"
-        return blr_table
+        empty_df = pd.DataFrame()
+        empty_df.name = "BLR (Is Fictional)"
+        return empty_df, {}
 
     combined = pd.concat(significant_dfs)
-    combined.sort_values(by=['Predictor', 'Variable'], inplace=True)
-    combined.loc[combined.duplicated(subset=['Predictor']), 'Predictor'] = ''
+    combined.sort_values(by=['Game Characteristic', 'Variable'], inplace=True)
+    combined.loc[combined.duplicated(subset=['Game Characteristic']), 'Game Characteristic'] = ''
     combined['Odds Ratio (95% CI)'] = combined.apply(
-        lambda row: f"{row['Odds Ratio']:.2f} [{row['CI Lower']:.2f}, {row['CI Upper']:.2f}]", axis=1)
+        lambda row: f"{row['Odds Ratio']:.2f} [{row['CI Lower']:.2f}, {row['CI Upper']:.2f}]" if pd.notna(row['Odds Ratio']) else '', axis=1)
     combined.rename(columns={'Variable': 'Category', 'P-Value': 'p-value'}, inplace=True)
-    final_cols = ['Predictor', 'Category', 'Odds Ratio (95% CI)', 'p-value']
+    final_cols = ['Game Characteristic', 'Category', 'Odds Ratio (95% CI)', 'p-value']
     blr_table = combined[final_cols]
     blr_table.name = "BLR (Is Fictional)"
-    return blr_table
+    return blr_table, blr_refs
+
+def format_sparsity_appendices(results_list):
+    """Formats sparsity details into three manuscript-ready appendix tables for each analysis type."""
+    is_fictional_details, treatment_details, recovery_details = [], [], []
+
+    for result in results_list:
+        if 'combined_groups' in result and result['combined_groups']:
+            detail = {
+                'Game Characteristic': HUMAN_READABLE_NAMES.get(result['game_characteristic'], result['game_characteristic']),
+                'Combined Categories (in "Other" group)': ', '.join(result['combined_groups'])
+            }
+            outcome = result['outcome']
+            if outcome == IS_FICTIONAL:
+                is_fictional_details.append(detail)
+            elif outcome == TREATMENT_ACCURACY:
+                treatment_details.append(detail)
+            elif outcome == RECOVERY_ACCURACY:
+                recovery_details.append(detail)
+
+    # Format "Is Fictional" Sparsity Appendix
+    if not is_fictional_details:
+        appendix_a = pd.DataFrame()
+    else:
+        appendix_a = pd.DataFrame(is_fictional_details).drop_duplicates().sort_values(by=['Game Characteristic'])
+    appendix_a.name = "Sparsity (Is Fictional)"
+
+    # Format "Treatment Accuracy" Sparsity Appendix
+    if not treatment_details:
+        appendix_b = pd.DataFrame()
+    else:
+        appendix_b = pd.DataFrame(treatment_details).drop_duplicates().sort_values(by=['Game Characteristic'])
+    appendix_b.name = "Sparsity (Treatment Acc)"
+
+    # Format "Recovery Accuracy" Sparsity Appendix
+    if not recovery_details:
+        appendix_c = pd.DataFrame()
+    else:
+        appendix_c = pd.DataFrame(recovery_details).drop_duplicates().sort_values(by=['Game Characteristic'])
+    appendix_c.name = "Sparsity (Recovery Acc)"
+
+    return appendix_a, appendix_b, appendix_c
+
+def format_separation_appendix(results_list):
+    """Formats details of excluded categories (due to separation) into a manuscript-ready appendix table."""
+    separation_details = []
+    for result in results_list:
+        if 'separated_groups' in result and result['separated_groups']:
+            detail = {
+                'Analysis': HUMAN_READABLE_NAMES.get(result['outcome'], result['outcome']),
+                'Game Characteristic': HUMAN_READABLE_NAMES.get(result['game_characteristic'], result['game_characteristic']),
+                'Excluded Categories': ', '.join(result['separated_groups'])
+            }
+            separation_details.append(detail)
+
+    if not separation_details:
+        appendix_d = pd.DataFrame()
+    else:
+        appendix_d = pd.DataFrame(separation_details).drop_duplicates().sort_values(by=['Analysis', 'Game Characteristic'])
+    appendix_d.name = "Excluded Categories"
+
+    return appendix_d
 
 # =======================================
 # Helper Functions
@@ -311,7 +416,8 @@ def fetch_igdb_game_data(wrapper, game_ids, query_limit=10):
             print(f"An error occurred during API request: {e}")
     games = pd.DataFrame(game_info)
     for col in ['franchise', 'game_engines', 'genres', 'themes', 'game_modes', 'keywords', 'platforms', 'player_perspectives']:
-        games[col] = games[col].apply(lambda d: [i.get('name') for i in d] if isinstance(d, list) else (d.get('name') if isinstance(d, dict) else d))
+        if col in games.columns:
+            games[col] = games[col].apply(lambda d: [i.get('name') for i in d] if isinstance(d, list) else (d.get('name') if isinstance(d, dict) else d))
     games.involved_companies = games.involved_companies.apply(lambda d: [c.get('company', {}).get('name') for c in d if c.get('company')] if isinstance(d, list) else None)
     games.age_ratings = games.age_ratings.apply(lambda ratings: next(({'organization': 'ESRB', 'category': r.get('rating_category', {}).get('rating'), 'descriptions': [d.get('description') for d in r.get('rating_content_descriptions', []) if d.get('description')]} for r in ratings if isinstance(r, dict) and r.get('organization', {}).get('name') == 'ESRB'), None) if isinstance(ratings, list) else None)
     age_ratings_df = pd.json_normalize(games['age_ratings']).add_prefix('age_rating_')
@@ -350,51 +456,43 @@ def run_statistical_analyses(categories, merged_df, merged_recovery_df, merged_l
     all_results = []
     print("Running Binary Logistic Regressions...")
     for category in categories:
+        if category not in merged_logistic_df.columns: continue
         df_blr = merged_logistic_df[[category, IS_FICTIONAL]].copy()
         if df_blr[category].apply(isinstance, args=(list,)).any(): df_blr = df_blr.explode(category)
-
-        # Data cleanup
         df_blr.dropna(subset=[category, IS_FICTIONAL], inplace=True)
         if df_blr.empty or df_blr[category].nunique() < 2 or df_blr[IS_FICTIONAL].nunique() < 2: continue
         df_blr, combined = handle_sparsity(df_blr, category, MIN_CATEGORY_COUNT)
         df_blr, separated = handle_separation(df_blr, category, IS_FICTIONAL)
         if df_blr.empty or df_blr[category].nunique() < 2: continue
-
         ref_category = df_blr[category].mode()[0]
-
         try:
             formula = f"is_fictional ~ C({category}, Treatment(reference='{ref_category}'))"
             model = smf.logit(formula, data=df_blr).fit(disp=0)
-            all_results.append({'analysis_type': 'BLR', 'predictor': category, 'outcome': IS_FICTIONAL, 'model_results': model, 'reference_category': ref_category, 'combined_groups': combined, 'separated_groups': separated})
+            all_results.append({'analysis_type': 'BLR', 'game_characteristic': category, 'outcome': IS_FICTIONAL, 'model_results': model, 'reference_category': ref_category, 'combined_groups': combined, 'separated_groups': separated})
         except Exception as e:
             print(f"  BLR failed for '{category}'. Error: {e}")
 
     print("\nRunning Ordinal Regressions and Kruskal-Wallis tests...")
     for outcome in [TREATMENT_ACCURACY, RECOVERY_ACCURACY]:
         base_df = merged_recovery_df if outcome == RECOVERY_ACCURACY else merged_df
-
         for category in categories:
+            if category not in base_df.columns: continue
             df_analysis = base_df[[category, outcome]].copy()
             if df_analysis[category].apply(isinstance, args=(list,)).any():
                 df_analysis = df_analysis.explode(category)
-
             df_analysis[outcome] = pd.to_numeric(df_analysis[outcome], errors='coerce')
             df_analysis.dropna(subset=[outcome, category], inplace=True)
-
             if df_analysis.empty or df_analysis[category].nunique() < 2: continue
-
             df_analysis, combined = handle_sparsity(df_analysis, category, MIN_CATEGORY_COUNT)
             df_analysis, separated = handle_separation(df_analysis, category, outcome)
-
             if df_analysis.empty or df_analysis[category].nunique() < 2: continue
-
             try:
                 ref_cat = df_analysis[category].value_counts().index[0]
                 formula_olr = f"{outcome} ~ C({category}, Treatment(reference='{ref_cat}'))"
                 model_olr = OrderedModel.from_formula(formula_olr, df_analysis, distr='logit').fit(method='bfgs', disp=0)
                 all_results.append({
                     'analysis_type': 'OLR',
-                    'predictor': category,
+                    'game_characteristic': category,
                     'outcome': outcome,
                     'model_results': model_olr,
                     'reference_category': ref_cat,
@@ -403,16 +501,14 @@ def run_statistical_analyses(categories, merged_df, merged_recovery_df, merged_l
                 })
             except Exception as e:
                 print(f"    OLR failed for {category} vs {outcome}. Error: {e}")
-
             groups = df_analysis.groupby(category)[outcome].apply(list)
             stat, p_val = sp.stats.kruskal(*groups)
             k, n = len(groups), len(df_analysis)
             eta_sq = (stat - k + 1) / (n - k) if n > k else 0
-            all_results.append({'analysis_type': 'Kruskal-Wallis', 'predictor': category, 'outcome': outcome, 'statistic': stat, 'p_value': p_val, 'eta_squared': eta_sq})
-
+            all_results.append({'analysis_type': 'Kruskal-Wallis', 'game_characteristic': category, 'outcome': outcome, 'statistic': stat, 'p_value': p_val, 'eta_squared': eta_sq})
             if p_val < P_VALUE_THRESHOLD:
                 dunn_df = posthoc.posthoc_dunn(df_analysis, val_col=outcome, group_col=category, p_adjust='holm')
-                all_results.append({'analysis_type': 'Dunn', 'predictor': category, 'outcome': outcome, 'results_df': dunn_df})
+                all_results.append({'analysis_type': 'Dunn', 'game_characteristic': category, 'outcome': outcome, 'results_df': dunn_df})
     return all_results
 
 # =======================================
@@ -429,28 +525,30 @@ if __name__ == "__main__":
     response.raise_for_status()
     wrapper = IGDBWrapper(CLIENT_ID, response.json()['access_token'])
 
-    injuries = pd.read_excel(DATA_FILE_PATH)
-    injuries[["Treatment Accuracy", "Recovery Accuracy"]] = injuries[["Treatment Accuracy", "Recovery Accuracy"]].apply(lambda x: pd.to_numeric(x.astype(str).str[0]))
-    injuries_for_blr = injuries.rename(columns=lambda x: x.lower().replace(' ', '_')).assign(is_fictional=lambda df: (df.treatment_accuracy == 0).astype(int))
+    encounters = pd.read_excel(DATA_FILE_PATH)
+    encounters[["Treatment Accuracy", "Recovery Accuracy"]] = encounters[["Treatment Accuracy", "Recovery Accuracy"]].apply(lambda x: pd.to_numeric(x.astype(str).str[0]))
+    encounters_for_blr = encounters.rename(columns=lambda x: x.lower().replace(' ', '_')).assign(is_fictional=lambda df: (df.treatment_accuracy == 0).astype(int))
 
-    injuries = injuries[injuries['Treatment Accuracy'] != 0]
-    injuries = injuries.rename(columns=lambda x: x.lower().replace(' ', '_').replace('-', '_')).assign(icd_10=lambda df: df['icd_10'].str.split('.').str[0].str.split(','))
+    encounters = encounters[encounters['Treatment Accuracy'] != 0]
+    encounters = encounters.rename(columns=lambda x: x.lower().replace(' ', '_').replace('-', '_')).assign(icd_10=lambda df: df['icd_10'].str.split('.').str[0].str.split(','))
 
-    games = fetch_igdb_game_data(wrapper, injuries['igdb_id'].unique())
+    games = fetch_igdb_game_data(wrapper, encounters['igdb_id'].unique())
 
-    merged_logistic_base = injuries_for_blr.merge(games, left_on='igdb_id', right_on='id')
-    merged_base = injuries[injuries['treatment_accuracy'] != 0].merge(games, left_on='igdb_id', right_on='id')
+    merged_logistic_base = encounters_for_blr.merge(games, left_on='igdb_id', right_on='id')
+    merged_base = encounters[encounters['treatment_accuracy'] != 0].merge(games, left_on='igdb_id', right_on='id')
     merged_treatment = merged_base.copy()
     merged_recovery = merged_base[merged_base['recovery_accuracy'] != 0].copy()
 
     os.makedirs(os.path.dirname(TABLES_OUTPUT_PATH), exist_ok=True)
 
     # --- Descriptive Statistics ---
-    icd10_counts = injuries["icd_10"].explode().value_counts()
+    icd10_counts = encounters["icd_10"].explode().value_counts()
     all_treatment_means, all_recovery_means = {}, {}
-    for category in ['age_rating_descriptions', 'genres', 'themes']:
-        all_treatment_means[category] = merged_treatment.explode(category).groupby(category)[[TREATMENT_ACCURACY]].mean()
-        all_recovery_means[category] = merged_recovery.explode(category).groupby(category)[[RECOVERY_ACCURACY]].mean()
+    for category in ['age_rating_descriptions', 'genres', 'themes', 'keywords']:
+        if category in merged_treatment.columns:
+            all_treatment_means[category] = merged_treatment.explode(category).groupby(category)[[TREATMENT_ACCURACY]].mean()
+        if category in merged_recovery.columns:
+            all_recovery_means[category] = merged_recovery.explode(category).groupby(category)[[RECOVERY_ACCURACY]].mean()
 
     # --- Spearman Correlation ---
     corr_data = merged_recovery[[TREATMENT_ACCURACY, RECOVERY_ACCURACY, 'total_rating']].dropna().astype(int)
@@ -464,22 +562,31 @@ if __name__ == "__main__":
     # --- Generate Manuscript Tables ---
     print("\nGenerating manuscript tables...")
     icd10_table = format_icd10_table(icd10_counts)
-    game_summary_table, injury_summary_table = format_summary_tables(games, merged_base)
+    game_summary_table, encounter_summary_table = format_summary_tables(games, merged_base)
     treatment_acc_table, recovery_acc_table = format_accuracy_mean_tables(all_treatment_means, all_recovery_means)
-
     kruskal_wallis_table = format_kruskal_wallis_table(all_analysis_results)
     dunn_treatment_table, dunn_recovery_table = format_dunn_tables(all_analysis_results)
 
-    olr_treatment_table, olr_recovery_table = format_olr_tables(all_analysis_results)
-    blr_table = format_blr_table(all_analysis_results)
+    olr_treatment_table, olr_recovery_table, olr_t_refs, olr_r_refs = format_olr_tables(all_analysis_results)
+    blr_table, blr_refs = format_blr_table(all_analysis_results)
+
+    # Add footnotes to the regression tables
+    olr_treatment_table = add_footnotes_to_table(olr_treatment_table, olr_t_refs)
+    olr_recovery_table = add_footnotes_to_table(olr_recovery_table, olr_r_refs)
+    blr_table = add_footnotes_to_table(blr_table, blr_refs)
 
     manuscript_tables = [
-        icd10_table, game_summary_table, injury_summary_table,
+        icd10_table, game_summary_table, encounter_summary_table,
         treatment_acc_table, recovery_acc_table, kruskal_wallis_table,
         dunn_treatment_table, dunn_recovery_table,
         olr_treatment_table, olr_recovery_table,
         blr_table
     ]
+
+    # --- Generate Appendix Tables ---
+    appendix_a, appendix_b, appendix_c = format_sparsity_appendices(all_analysis_results)
+    appendix_d = format_separation_appendix(all_analysis_results)
+    appendix_tables = [appendix_a, appendix_b, appendix_c, appendix_d]
 
     # --- Write Manuscript Tables to Tables.xlsx ---
     print(f"Writing manuscript tables to {TABLES_OUTPUT_PATH}...")
@@ -488,31 +595,39 @@ if __name__ == "__main__":
             if table is not None and not table.empty:
                 table.to_excel(writer, sheet_name=table.name, index=False)
 
-    # --- Write Full and Supplementary Results to Supplemental_Results.xlsx ---
+    # --- Write Appendix Tables to Appendices.xlsx ---
+    print(f"Writing appendices to {APPENDICES_OUTPUT_PATH}...")
+    with pd.ExcelWriter(APPENDICES_OUTPUT_PATH) as writer:
+        for table in appendix_tables:
+            if table is not None and not table.empty:
+                table.to_excel(writer, sheet_name=table.name, index=False)
+
+    # --- Prepare and Write Supplementary Results ---
     print(f"Writing all supplementary data and full results to {SUPPLEMENTAL_OUTPUT_PATH}...")
     with pd.ExcelWriter(SUPPLEMENTAL_OUTPUT_PATH) as writer:
         # Write supplementary data
         merged_base.to_excel(writer, sheet_name='Supp - Merged Data', index=False)
         games.to_excel(writer, sheet_name='Supp - Games Data', index=False)
-
         get_descriptive_stats(merged_base).to_excel(writer, sheet_name='Supp - Descriptive Stats')
-        pd.concat(all_treatment_means).to_excel(writer, sheet_name="Supp - All Treatment Means")
-        pd.concat(all_recovery_means).to_excel(writer, sheet_name="Supp - All Recovery Means")
+
+        if all_treatment_means:
+            pd.concat(all_treatment_means).to_excel(writer, sheet_name="Supp - All Treatment Means")
+        if all_recovery_means:
+            pd.concat(all_recovery_means).to_excel(writer, sheet_name="Supp - All Recovery Means")
 
         spearman_df.to_excel(writer, sheet_name='Supp - Spearman R')
-        pval_df.to_excel(writer, sheet_name='Supp - Spearman R', startrow=len(spearman_df)+2)
-        pd.DataFrame({'N': [len(corr_data)]}).to_excel(writer, sheet_name='Supp - Spearman R', startrow=len(spearman_df)+len(pval_df)+4, index=False)
+        pval_df.to_excel(writer, sheet_name='Supp - Spearman P-Values', startrow=len(spearman_df)+2)
+        pd.DataFrame({'N': [len(corr_data)]}).to_excel(writer, sheet_name='Supp - Spearman P-Values', startrow=len(spearman_df)+len(pval_df)+4, index=False)
 
         # Write full, unabridged analysis results
         for res_type in ['BLR', 'OLR', 'Dunn']:
             results = [r for r in all_analysis_results if r['analysis_type'] == res_type]
             for res in results:
-                predictor_hr = HUMAN_READABLE_NAMES.get(res['predictor'], res['predictor'])
+                game_characteristic_hr = HUMAN_READABLE_NAMES.get(res['game_characteristic'], res['game_characteristic'])
                 outcome_hr = HUMAN_READABLE_NAMES.get(res['outcome'], res['outcome'])
-                sheet_name = f"Full - {res_type} {predictor_hr}-{outcome_hr}"[:31]
+                sheet_name = f"Full - {res_type} {game_characteristic_hr}-{outcome_hr}"[:31]
 
                 if res_type in ['BLR', 'OLR']:
-                    # Use full_results=True to get unabridged output
                     full_regression_output = format_regression_for_manuscript(res['model_results'], "", full_results=True)
                     full_regression_output.to_excel(writer, sheet_name=sheet_name, index=False)
                 elif res_type == 'Dunn':
