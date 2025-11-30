@@ -1,5 +1,5 @@
 # pixelated-medicine
-Code and website for ACM Games publication
+Code and website for [ACM Games publication](https://dl.acm.org/doi/10.1145/3777902)
 
 ## Code
 The code has a separate [README.md](./pixelated-medicine/README.md).
